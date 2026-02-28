@@ -1,0 +1,166 @@
+#!/bin/bash
+
+# Bypass MDM for Intel Macs (2017 i5)
+# Adapted for traditional volume structure
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+echo -e "${BLUE}"
+echo "╔════════════════════════════════════════╗"
+echo "║    MDM Bypass for Intel Mac (2017)    ║"
+echo "║         i5 Compatible Version         ║"
+echo "╚════════════════════════════════════════╝"
+echo -e "${NC}"
+
+# Check if running in Recovery Mode
+if ! diskutil list | grep -q "disk0"; then
+    echo -e "${RED}✗ Not in recovery mode or no disks found${NC}"
+    echo "Please boot to Recovery Mode (CMD+R) and try again"
+    exit 1
+fi
+
+# Mount main volume (Intel Macs typically have one main volume)
+echo -e "${YELLOW}➜ Mounting main volume...${NC}"
+
+# Find the main macOS volume
+MAIN_VOLUME=""
+for vol in "/Volumes/"*; do
+    if [ -d "$vol/System" ] || [ -d "$vol/Applications" ]; then
+        MAIN_VOLUME="$vol"
+        break
+    fi
+done
+
+if [ -z "$MAIN_VOLUME" ]; then
+    # Try common names for Intel Macs
+    for name in "Macintosh HD" "MacOS" "OS X" "macOS"; do
+        if [ -d "/Volumes/$name" ]; then
+            MAIN_VOLUME="/Volumes/$name"
+            break
+        fi
+    done
+fi
+
+if [ -z "$MAIN_VOLUME" ]; then
+    echo -e "${RED}✗ Could not find macOS volume${NC}"
+    echo "Available volumes:"
+    ls /Volumes/
+    exit 1
+fi
+
+echo -e "${GREEN}✓ Found volume: $MAIN_VOLUME${NC}"
+
+# Mount as read-write
+mount -uw "$MAIN_VOLUME" 2>/dev/null
+
+# Create temporary user
+echo -e "${YELLOW}➜ Creating temporary admin user...${NC}"
+
+# Get user details
+read -p "Enter fullname [Apple]: " FULLNAME
+FULLNAME=${FULLNAME:-Apple}
+
+read -p "Enter username [Apple]: " USERNAME
+USERNAME=${USERNAME:-Apple}
+
+while true; do
+    read -s -p "Enter password [1234]: " PASSWORD
+    echo
+    PASSWORD=${PASSWORD:-1234}
+    if [ ${#PASSWORD} -ge 4 ]; then
+        break
+    else
+        echo -e "${RED}Password must be at least 4 characters${NC}"
+    fi
+done
+
+# Find available UID
+MAX_UID=$(dscl -f "$MAIN_VOLUME/var/db/dslocal/nodes/Default" localhost -list /Local/Default/Users UniqueID | awk '{print $2}' | sort -n | tail -1)
+NEW_UID=$((MAX_UID + 1))
+
+echo -e "${YELLOW}➜ Creating user with UID: $NEW_UID${NC}"
+
+# Create user in local directory
+dscl -f "$MAIN_VOLUME/var/db/dslocal/nodes/Default" localhost -create /Local/Default/Users/$USERNAME
+dscl -f "$MAIN_VOLUME/var/db/dslocal/nodes/Default" localhost -create /Local/Default/Users/$USERNAME UserShell /bin/bash
+dscl -f "$MAIN_VOLUME/var/db/dslocal/nodes/Default" localhost -create /Local/Default/Users/$USERNAME RealName "$FULLNAME"
+dscl -f "$MAIN_VOLUME/var/db/dslocal/nodes/Default" localhost -create /Local/Default/Users/$USERNAME UniqueID $NEW_UID
+dscl -f "$MAIN_VOLUME/var/db/dslocal/nodes/Default" localhost -create /Local/Default/Users/$USERNAME PrimaryGroupID 20
+dscl -f "$MAIN_VOLUME/var/db/dslocal/nodes/Default" localhost -create /Local/Default/Users/$USERNAME NFSHomeDirectory /Users/$USERNAME
+dscl -f "$MAIN_VOLUME/var/db/dslocal/nodes/Default" localhost -passwd /Local/Default/Users/$USERNAME "$PASSWORD"
+
+# Add to admin group
+dscl -f "$MAIN_VOLUME/var/db/dslocal/nodes/Default" localhost -append /Local/Default/Groups/admin GroupMembership $USERNAME
+
+# Create home directory
+mkdir -p "$MAIN_VOLUME/Users/$USERNAME"
+chown -R $NEW_UID:20 "$MAIN_VOLUME/Users/$USERNAME"
+
+echo -e "${GREEN}✓ User created successfully${NC}"
+
+# Block MDM domains (Intel method)
+echo -e "${YELLOW}➜ Blocking MDM domains...${NC}"
+
+# Backup hosts file
+cp "$MAIN_VOLUME/etc/hosts" "$MAIN_VOLUME/etc/hosts.backup" 2>/dev/null
+
+# Add MDM blocks
+{
+    echo ""
+    echo "# MDM Bypass"
+    echo "0.0.0.0 deviceenrollment.apple.com"
+    echo "0.0.0.0 mdmenrollment.apple.com"
+    echo "0.0.0.0 iprofiles.apple.com"
+    echo "0.0.0.0 gdmf.apple.com"
+    echo "0.0.0.0 acmdm.apple.com"
+    echo "0.0.0.0 albert.apple.com"
+} >> "$MAIN_VOLUME/etc/hosts"
+
+echo -e "${GREEN}✓ MDM domains blocked${NC}"
+
+# Remove MDM configuration files
+echo -e "${YELLOW}➜ Removing MDM configuration...${NC}"
+
+# For Intel Macs, MDM configs are in these locations
+rm -rf "$MAIN_VOLUME/var/db/ConfigurationProfiles/"* 2>/dev/null
+rm -rf "$MAIN_VOLUME/Library/ConfigurationProfiles/"* 2>/dev/null
+rm -f "$MAIN_VOLUME/var/db/ConfigurationProfiles/.profilesAreInstalled" 2>/dev/null
+
+# Create empty profile directory to prevent recreation
+mkdir -p "$MAIN_VOLUME/var/db/ConfigurationProfiles"
+touch "$MAIN_VOLUME/var/db/ConfigurationProfiles/.profilesAreInstalled"
+
+echo -e "${GREEN}✓ MDM configuration removed${NC}"
+
+# Disable setup assistant (Intel specific)
+echo -e "${YELLOW}➜ Configuring setup assistant...${NC}"
+
+mkdir -p "$MAIN_VOLUME/var/db/"
+touch "$MAIN_VOLUME/var/db/.AppleSetupDone"
+
+echo -e "${GREEN}✓ Setup assistant bypassed${NC}"
+
+echo -e "${BLUE}"
+echo "╔════════════════════════════════════════╗"
+echo "║     MDM Bypass Completed Successfully  ║"
+echo "╚════════════════════════════════════════╝"
+echo -e "${NC}"
+echo -e "${YELLOW}Summary:${NC}"
+echo "  • Volume: $MAIN_VOLUME"
+echo "  • User: $USERNAME"
+echo "  • Password: $PASSWORD"
+echo ""
+echo -e "${GREEN}Next steps:${NC}"
+echo "1. Close Terminal"
+echo "2. Reboot Mac"
+echo "3. Login with: $USERNAME / $PASSWORD"
+echo "4. Skip ALL setup prompts"
+echo "5. Create your permanent admin account"
+echo "6. Delete temporary user"
+echo ""
+echo -e "${RED}Important: Keep WiFi OFF during first boot!${NC}"
